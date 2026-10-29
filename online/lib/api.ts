@@ -35,7 +35,7 @@ export async function handle(request:Request):Promise<Response>{
   }
   const user=await member();
   if(path==='/session'&&request.method==='GET')return json({user:user?{...user,id:user.id}:null,statuses:STATUSES,categories:CATEGORIES,priorities:PRIORITIES});
-  if(!user)throw new ApiError(401,'Entre com sua conta do ChatGPT para continuar.');
+  if(!user)throw new ApiError(401,'Entre com sua conta autorizada para continuar.');
   if(path==='/tickets'&&request.method==='GET'){
    const rows=await db.prepare("SELECT t.id,t.protocol,t.title,t.category,t.location,t.priority,t.status,t.assignee,t.created_at,t.updated_at,m.name AS author,m.unit FROM condo_tickets t JOIN condo_members m ON m.user_id=t.user_id WHERE (?='admin' OR t.user_id=?) ORDER BY t.id DESC").bind(user.role,user.user_id).all();
    return json({tickets:rows.results});
