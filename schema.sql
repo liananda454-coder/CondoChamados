@@ -17,3 +17,10 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_ticket ON history(ticket_id);
 CREATE TABLE IF NOT EXISTS login_attempts (email TEXT NOT NULL, occurred REAL NOT NULL);
+
+CREATE TABLE IF NOT EXISTS public_requests (
+ ticket_id INTEGER PRIMARY KEY REFERENCES tickets(id), name TEXT NOT NULL,
+ unit TEXT NOT NULL, code_hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS public_attempts (key TEXT NOT NULL, occurred REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS public_attempts_key ON public_attempts(key);

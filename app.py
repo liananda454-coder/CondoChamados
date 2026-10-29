@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import secrets
@@ -58,7 +59,7 @@ def create_app(test_config=None):
         return wrapped
 
     def ticket(tid):
-        row = db().execute('SELECT t.*,u.name AS author,u.unit FROM tickets t JOIN users u ON u.id=t.user_id WHERE t.id=?', (tid,)).fetchone()
+        row = db().execute('SELECT t.*,COALESCE(p.name,u.name) AS author,COALESCE(p.unit,u.unit) AS unit FROM tickets t JOIN users u ON u.id=t.user_id LEFT JOIN public_requests p ON p.ticket_id=t.id WHERE t.id=?', (tid,)).fetchone()
         if not row or (g.user['role'] != 'admin' and row['user_id'] != g.user['id']):
             abort(404, 'Chamado não encontrado.')
         return row
@@ -117,7 +118,7 @@ def create_app(test_config=None):
         if count >= 10:
             abort(429, 'Muitas tentativas. Aguarde 15 minutos.')
         row = db().execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
-        if not row or not check_password_hash(row['password'], password):
+        if not row or row['email'] == 'public@invalid.local' or not check_password_hash(row['password'], password):
             db().execute('INSERT INTO login_attempts VALUES (?,?)', (email, datetime.now(timezone.utc).timestamp()))
             db().commit()
             abort(401, 'E-mail ou senha incorretos.')
@@ -136,13 +137,50 @@ def create_app(test_config=None):
     @app.get('/api/tickets')
     @secured
     def list_tickets():
-        rows = db().execute('SELECT t.id,t.protocol,t.title,t.category,t.location,t.priority,t.status,t.assignee,t.created_at,t.updated_at,u.name AS author,u.unit FROM tickets t JOIN users u ON u.id=t.user_id WHERE (?=\'admin\' OR t.user_id=?) ORDER BY t.id DESC', (g.user['role'], g.user['id'])).fetchall()
+        rows = db().execute('SELECT t.id,t.protocol,t.title,t.category,t.location,t.priority,t.status,t.assignee,t.created_at,t.updated_at,COALESCE(p.name,u.name) AS author,COALESCE(p.unit,u.unit) AS unit FROM tickets t JOIN users u ON u.id=t.user_id LEFT JOIN public_requests p ON p.ticket_id=t.id WHERE (?=\'admin\' OR t.user_id=?) ORDER BY t.id DESC', (g.user['role'], g.user['id'])).fetchall()
         return jsonify(tickets=[dict(r) for r in rows])
+
+    def rate_limit(kind, maximum):
+        # Hash network identifiers; never trust arbitrary forwarded headers.
+        key = hashlib.sha256((kind + (request.remote_addr or 'unknown')).encode()).hexdigest()
+        cutoff = datetime.now(timezone.utc).timestamp() - 3600
+        with db():
+            db().execute('DELETE FROM public_attempts WHERE occurred < ?', (cutoff,))
+            if db().execute('SELECT count(*) FROM public_attempts WHERE key=?', (key,)).fetchone()[0] >= maximum:
+                abort(429, 'Muitas solicitações. Aguarde uma hora antes de tentar novamente.')
+            db().execute('INSERT INTO public_attempts VALUES (?,?)', (key, datetime.now(timezone.utc).timestamp()))
+
+    @app.post('/api/public/tickets')
+    def public_create():
+        rate_limit('create', 20)
+        return create_ticket(public=True)
+
+    @app.post('/api/public/track')
+    def public_track():
+        rate_limit('track', 120)
+        data = request.get_json() or {}
+        protocol = value(data, 'protocol', 1, 80).upper()
+        code = value(data, 'code', 1, 128)
+        row = db().execute('SELECT t.*,p.code_hash FROM tickets t JOIN public_requests p ON p.ticket_id=t.id WHERE t.protocol=?', (protocol,)).fetchone()
+        if not row or not secrets.compare_digest(row['code_hash'], hashlib.sha256(code.encode()).hexdigest()):
+            abort(404, 'Protocolo ou código de acompanhamento inválido.')
+        fields = ['protocol','title','description','category','location','status','priority','assignee','created_at','updated_at']
+        history = db().execute('SELECT note,created_at FROM history WHERE ticket_id=? ORDER BY id', (row['id'],)).fetchall()
+        return jsonify(ticket={k:row[k] for k in fields}, history=[dict(h) for h in history])
 
     @app.post('/api/tickets')
     @secured
-    def create_ticket():
+    def authenticated_create():
+        return create_ticket()
+
+    def create_ticket(public=False):
         data = request.form
+        if public:
+            name = value(data, 'name', 2, 100)
+            unit = value(data, 'unit', 2, 80)
+            code = secrets.token_urlsafe(24)
+            if data.get('website'):
+                abort(400, 'Não foi possível registrar o chamado.')
         title = value(data, 'title', 5, 120)
         description = value(data, 'description', 10, 4000)
         location = value(data, 'location', 2, 160)
@@ -164,11 +202,20 @@ def create_app(test_config=None):
                 abort(400, 'O arquivo não é uma imagem válida.')
         stamp = now()
         with db():
-            cur = db().execute('INSERT INTO tickets (user_id,title,description,location,category,photo,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', (g.user['id'], title, description, location, category, photo, stamp, stamp))
+            if public:
+                db().execute("INSERT OR IGNORE INTO users (name,email,password,unit,role) VALUES ('Solicitação sem conta','public@invalid.local','!disabled','Sem conta','resident')")
+                owner = db().execute("SELECT id FROM users WHERE email='public@invalid.local'").fetchone()['id']
+            else:
+                owner = g.user['id']
+            cur = db().execute('INSERT INTO tickets (user_id,title,description,location,category,photo,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', (owner, title, description, location, category, photo, stamp, stamp))
             tid = cur.lastrowid
             protocol = f'CC-{datetime.now(timezone.utc).year}-{tid:05d}'
             db().execute('UPDATE tickets SET protocol=? WHERE id=?', (protocol, tid))
-            db().execute('INSERT INTO history (ticket_id,actor_id,note,created_at) VALUES (?,?,?,?)', (tid, g.user['id'], 'Chamado aberto.', stamp))
+            db().execute('INSERT INTO history (ticket_id,actor_id,note,created_at) VALUES (?,?,?,?)', (tid, owner, 'Chamado aberto.', stamp))
+            if public:
+                db().execute('INSERT INTO public_requests (ticket_id,name,unit,code_hash) VALUES (?,?,?,?)', (tid,name,unit,hashlib.sha256(code.encode()).hexdigest()))
+        if public:
+            return jsonify(protocol=protocol, code=code), 201
         return jsonify(id=tid, protocol=protocol), 201
 
     @app.get('/api/tickets/<int:tid>')
@@ -220,12 +267,12 @@ def create_app(test_config=None):
     def users():
         if g.user['role'] != 'admin':
             abort(403)
-        return jsonify(users=[dict(r) for r in db().execute('SELECT id,name,email,unit,role FROM users ORDER BY name')])
+        return jsonify(users=[dict(r) for r in db().execute("SELECT id,name,email,unit,role FROM users WHERE email != 'public@invalid.local' ORDER BY name")])
 
     def add_user(data):
         name = value(data, 'name', 2, 100)
         email = value(data, 'email', 3, 254).lower()
-        if '@' not in email or '.' not in email.split('@')[-1]:
+        if email == 'public@invalid.local' or '@' not in email or '.' not in email.split('@')[-1]:
             abort(400, 'E-mail inválido.')
         password = value(data, 'password', 12, 128)
         unit = value(data, 'unit', 1, 80)
@@ -253,5 +300,18 @@ def create_app(test_config=None):
     def admin_command(name, email, password):
         add_user(dict(name=name, email=email, password=password, unit='Administração', role='admin'))
         click.echo('Administrador criado. Entre pela interface e cadastre os moradores.')
+
+    @app.cli.command('set-admin-password')
+    @click.option('--email', prompt='E-mail')
+    @click.password_option(confirmation_prompt=True)
+    def set_admin_password(email, password):
+        if not 12 <= len(password) <= 128:
+            raise click.ClickException('Use uma senha entre 12 e 128 caracteres.')
+        row = db().execute("SELECT id FROM users WHERE email=? AND role='admin'", (email.strip().lower(),)).fetchone()
+        if not row:
+            raise click.ClickException('Administrador não encontrado. Use create-admin para cadastrar.')
+        with db():
+            db().execute('UPDATE users SET password=? WHERE id=?', (generate_password_hash(password), row['id']))
+        click.echo('Senha administrativa atualizada.')
 
     return app

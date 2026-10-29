@@ -82,3 +82,42 @@ def test_page_and_persistence(app):
     assert 'frame-ancestors' in client.get('/').headers['Content-Security-Policy']
     other=create_app({'TESTING':True,'SECRET_KEY':'test-only-secret','DATABASE':app.config['DATABASE']})
     assert len(login(other,'ana').get('/api/tickets').json['tickets'])==1
+
+def guest_create(client):
+    return client.post('/api/public/tickets',data=dict(name='Morador teste',unit='Torre 1 / 101',title='TESTE lâmpada apagada',description='Exemplo de teste sem ocorrência real.',category='Iluminação',location='Hall'),headers=headers(client))
+
+def test_public_flow_private_tracking_and_management(app):
+    guest=app.test_client(); r=guest_create(guest)
+    assert r.status_code==201
+    receipt=r.json
+    assert len(receipt['code']) >= 32
+    other=app.test_client()
+    assert other.get('/api/tickets').status_code==401
+    assert other.post('/api/public/track',json={**receipt,'code':'wrong'},headers=headers(other)).status_code==404
+    t=other.post('/api/public/track',json=receipt,headers=headers(other))
+    assert t.status_code==200 and t.json['ticket']['status']=='Aberto'
+    assert not {'name','unit','user_id','photo','code_hash'} & set(t.json['ticket'])
+    admin=login(app,'admin'); rows=admin.get('/api/tickets').json['tickets']
+    tid=rows[0]['id']; assert rows[0]['author']=='Morador teste'
+    assert rows[0]['unit']=='Torre 1 / 101'
+    assert other.get(f'/api/tickets/{tid}').status_code==401
+    assert other.get(f'/api/tickets/{tid}/photo').status_code==401
+    assert other.patch(f'/api/tickets/{tid}',json={},headers=headers(other)).status_code==401
+    assert admin.patch(f'/api/tickets/{tid}',json=dict(status='Concluído',priority='Normal',assignee='Equipe teste',note='Teste concluído, sem reparo real.'),headers=headers(admin)).status_code==200
+    result=other.post('/api/public/track',json=receipt,headers=headers(other)).json
+    assert result['ticket']['status']=='Concluído' and len(result['history'])==2
+    second=guest_create(guest).json
+    assert other.post('/api/public/track',json=dict(protocol=second['protocol'],code=receipt['code']),headers=headers(other)).status_code==404
+    with sqlite3.connect(app.config['DATABASE']) as db:
+        assert db.execute('SELECT code_hash FROM public_requests WHERE ticket_id=?',(tid,)).fetchone()[0]!=receipt['code']
+    assert all(u['email']!='public@invalid.local' for u in admin.get('/api/users').json['users'])
+
+def test_public_validation_csrf_rate_limit_and_restart(app):
+    guest=app.test_client()
+    assert guest.post('/api/public/tickets',data={}).status_code==403
+    assert guest.post('/api/public/tickets',data={},headers=headers(guest)).status_code==400
+    receipt=guest_create(guest).json
+    other=create_app({'TESTING':True,'SECRET_KEY':'test-only-secret','DATABASE':app.config['DATABASE']}).test_client()
+    assert other.post('/api/public/track',json=receipt,headers=headers(other)).status_code==200
+    for _ in range(18): assert guest_create(guest).status_code==201
+    assert guest_create(guest).status_code==429

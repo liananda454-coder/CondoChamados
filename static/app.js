@@ -14,6 +14,7 @@ function options(selector, values) { $(selector).replaceChildren(...values.map(v
 async function init() {
   state=await api('/session');
   $('#login').hidden=!!state.user; $('#workspace').hidden=!state.user;
+  options('#new-category',state.categories);
   if(!state.user) { $('#account').replaceChildren(); return; }
   $('#account').innerHTML=`<span>${escapeHTML(state.user.name)}<small>${state.user.role==='admin'?'Administração':escapeHTML(state.user.unit)}</small></span><button id="logout" class="secondary">Sair</button>`;
   $('#logout').onclick=async()=>{try{await api('/logout',{method:'POST'}); location.reload();}catch(e){notice(e.message,true);}};
@@ -54,13 +55,17 @@ function submit(selector, handler) {
   });
 }
 submit('#login-form',async form=>{await api('/login',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();notice('');await init();});
-submit('#ticket-form',async form=>{const result=await api('/tickets',{method:'POST',body:new FormData(form)});$('#new-dialog').close();form.reset();await refresh();notice(`Chamado ${result.protocol} registrado.`);await openDetail(result.id);});
+submit('#ticket-form',async form=>{const guest=!state.user;const result=await api(guest?'/public/tickets':'/tickets',{method:'POST',body:new FormData(form)});if(guest){$('#new-dialog').close();form.reset();$('#receipt-protocol').value=result.protocol;$('#receipt-code').value=result.code;$('#track-form').elements.protocol.value=result.protocol;$('#track-form').elements.code.value=result.code;$('#receipt-dialog').showModal();return;}$('#new-dialog').close();form.reset();await refresh();notice(`Chamado ${result.protocol} registrado.`);await openDetail(result.id);});
 submit('#update-form',async form=>{await api('/tickets/'+selected,{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(form)))});await refresh();await openDetail(selected);notice('Atendimento atualizado.');});
 async function loadUsers(){const result=await api('/users');$('#user-list').innerHTML=result.users.map(u=>`<article class="user-row"><strong>${escapeHTML(u.name)}</strong><span>${escapeHTML(u.email)}</span><span>${escapeHTML(u.unit)} · ${u.role==='admin'?'Administração':'Morador'}</span></article>`).join('');}
 submit('#user-form',async form=>{await api('/users',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();notice('Acesso cadastrado.');await loadUsers();});
-$('#new-ticket').onclick=()=>{$('#ticket-form .form-error').textContent='';$('#new-dialog').showModal();};
+$('#new-ticket').onclick=()=>{$('#public-fields').hidden=true;$('#ticket-form').elements.name.required=false;$('#ticket-form').elements.unit.required=false;$('#ticket-form .form-error').textContent='';$('#new-dialog').showModal();};
 document.querySelectorAll('.close').forEach(b=>b.onclick=()=>b.closest('dialog').close());
 for(const selector of ['#search','#filter-status','#filter-category']) $(selector).addEventListener('input',render);
 $('#tickets-tab').onclick=()=>{$('#ticket-section').hidden=false;$('#user-section').hidden=true;};
 $('#users-tab').onclick=async()=>{$('#ticket-section').hidden=true;$('#user-section').hidden=false;try{await loadUsers();}catch(e){notice(e.message,true);}};
 init().catch(e=>notice(e.message,true));
+
+$('#public-new').onclick=()=>{const form=$('#ticket-form');form.reset();$('#public-fields').hidden=false;form.elements.name.required=true;form.elements.unit.required=true;$('#ticket-form .form-error').textContent='';$('#new-dialog').showModal();};
+submit('#track-form',async form=>{const {ticket:t,history}=await api('/public/track',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});$('#public-result').innerHTML=`<p>${escapeHTML(t.protocol)}</p><h3>${escapeHTML(t.title)}</h3><p><strong>${escapeHTML(t.status)}</strong> · Prioridade ${escapeHTML(t.priority)}</p><p>${escapeHTML(t.description)}</p><p>Local: ${escapeHTML(t.location)}</p><p>Responsável: ${escapeHTML(t.assignee||'A definir')}</p><h3>Histórico</h3><ol class="timeline">${history.map(h=>`<li><small>${date(h.created_at)}</small><p>${escapeHTML(h.note)}</p></li>`).join('')}</ol>`;$('#public-detail').showModal();});
+$('#download-receipt').onclick=()=>{const text=`CondoChamados — Happening Ipiranga\nProtocolo: ${$('#receipt-protocol').value}\nCódigo privado: ${$('#receipt-code').value}\nAcompanhe em ${location.origin}\nNão compartilhe este código publicamente.`;const url=URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='comprovante-chamado.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
