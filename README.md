@@ -2,6 +2,10 @@
 
 Sistema web de registro e acompanhamento de chamados do **Condomínio Happening Ipiranga**, desenvolvido como Projeto Integrador UNIVESP. Empresa de referência: **ANSERV GERAL – Portaria 360º** ([site informado](https://www.portaria360.com.br)). Projeto acadêmico; não implica homologação pela empresa.
 
+## Versão online
+
+A versão adaptada para Sites está em [`online/`](online/README.md), com autenticação ChatGPT e banco D1/fotos R2. A versão Flask abaixo permanece disponível para execução própria. A publicação e o acesso da versão online são independentes da execução Python.
+
 ## O que já funciona
 
 - Login com senha protegida por hash; perfis de morador e administração.
